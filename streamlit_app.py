@@ -1,17 +1,11 @@
-"""
-Streamlit application for PDF-based Retrieval-Augmented Generation (RAG) using Ollama + LangChain.
-
-This application allows users to upload a PDF, process it,
-and then ask questions about the content using a selected language model.
-"""
-
 import streamlit as st
 import logging
 import os
 import tempfile
 import shutil
-import pdfplumber
+import fitz  # PyMuPDF
 import ollama
+import time
 
 from langchain_community.document_loaders import UnstructuredPDFLoader
 from langchain_community.embeddings import OllamaEmbeddings
@@ -61,6 +55,45 @@ def extract_model_names(
     return model_names
 
 
+def extract_text_from_pdf(file_upload) -> str:
+    """
+    Extract text from an uploaded PDF file using PyMuPDF.
+
+    Args:
+        file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
+
+    Returns:
+        str: The extracted text from the PDF.
+    """
+    logger.info(f"Extracting text from PDF file: {file_upload.name}")
+    temp_dir = tempfile.mkdtemp()
+    path = os.path.join(temp_dir, file_upload.name)
+
+    with open(path, "wb") as f:
+        f.write(file_upload.getvalue())
+
+    doc = fitz.open(path)
+    text = ""
+    for page in doc:
+        text += page.get_text()
+    
+    doc.close()
+
+    # Retry mechanism to ensure the file is not in use
+    for _ in range(5):
+        try:
+            shutil.rmtree(temp_dir)
+            break
+        except PermissionError:
+            logger.warning("Temporary directory in use, retrying...")
+            time.sleep(1)
+    else:
+        logger.error("Failed to remove temporary directory after retries")
+    
+    logger.info(f"Temporary directory {temp_dir} removed")
+    return text
+
+
 def create_vector_db(file_upload) -> Chroma:
     """
     Create a vector database from an uploaded PDF file.
@@ -72,27 +105,13 @@ def create_vector_db(file_upload) -> Chroma:
         Chroma: A vector store containing the processed document chunks.
     """
     logger.info(f"Creating vector DB from file upload: {file_upload.name}")
-    temp_dir = tempfile.mkdtemp()
-
-    path = os.path.join(temp_dir, file_upload.name)
-    with open(path, "wb") as f:
-        f.write(file_upload.getvalue())
-        logger.info(f"File saved to temporary path: {path}")
-        loader = UnstructuredPDFLoader(path)
-        data = loader.load()
-
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100)
-    chunks = text_splitter.split_documents(data)
+    text = extract_text_from_pdf(file_upload)
+    chunks = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100).split_text(text)
     logger.info("Document split into chunks")
 
     embeddings = OllamaEmbeddings(model="nomic-embed-text", show_progress=True)
-    vector_db = Chroma.from_documents(
-        documents=chunks, embedding=embeddings, collection_name="myRAG"
-    )
+    vector_db = Chroma.from_texts(chunks, embeddings, collection_name="myRAG")
     logger.info("Vector DB created")
-
-    shutil.rmtree(temp_dir)
-    logger.info(f"Temporary directory {temp_dir} removed")
     return vector_db
 
 
@@ -108,8 +127,7 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     Returns:
         str: The generated response to the user's question.
     """
-    logger.info(f"""Processing question: {
-                question} using model: {selected_model}""")
+    logger.info(f"Processing question: {question} using model: {selected_model}")
     llm = ChatOllama(model=selected_model, temperature=0)
     QUERY_PROMPT = PromptTemplate(
         input_variables=["question"],
@@ -150,7 +168,7 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
 @st.cache_data
 def extract_all_pages_as_images(file_upload) -> List[Any]:
     """
-    Extract all pages from a PDF file as images.
+    Extract all pages from a PDF file as images using PyMuPDF.
 
     Args:
         file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
@@ -158,13 +176,35 @@ def extract_all_pages_as_images(file_upload) -> List[Any]:
     Returns:
         List[Any]: A list of image objects representing each page of the PDF.
     """
-    logger.info(f"""Extracting all pages as images from file: {
-                file_upload.name}""")
-    pdf_pages = []
-    with pdfplumber.open(file_upload) as pdf:
-        pdf_pages = [page.to_image().original for page in pdf.pages]
-    logger.info("PDF pages extracted as images")
-    return pdf_pages
+    logger.info(f"Extracting all pages as images from file: {file_upload.name}")
+    temp_dir = tempfile.mkdtemp()
+    path = os.path.join(temp_dir, file_upload.name)
+
+    with open(path, "wb") as f:
+        f.write(file_upload.getvalue())
+
+    doc = fitz.open(path)
+    images = []
+    for page in doc:
+        pix = page.get_pixmap()
+        image = pix.get_image_data()
+        images.append(image)
+    
+    doc.close()
+
+    # Retry mechanism to ensure the file is not in use
+    for _ in range(5):
+        try:
+            shutil.rmtree(temp_dir)
+            break
+        except PermissionError:
+            logger.warning("Temporary directory in use, retrying...")
+            time.sleep(1)
+    else:
+        logger.error("Failed to remove temporary directory after retries")
+    
+    logger.info(f"Temporary directory {temp_dir} removed")
+    return images
 
 
 def delete_vector_db(vector_db: Optional[Chroma]) -> None:
@@ -229,9 +269,8 @@ def main() -> None:
         )
 
         with col1:
-            with st.container(height=410, border=True):
-                for page_image in pdf_pages:
-                    st.image(page_image, width=zoom_level)
+            for page_image in pdf_pages:
+                st.image(page_image, width=zoom_level)
 
     delete_collection = col1.button("⚠️ Delete collection", type="secondary")
 
@@ -239,20 +278,21 @@ def main() -> None:
         delete_vector_db(st.session_state["vector_db"])
 
     with col2:
-        message_container = st.container(height=500, border=True)
+        message_container = st.container()
 
         for message in st.session_state["messages"]:
             avatar = "🤖" if message["role"] == "assistant" else "😎"
-            with message_container.chat_message(message["role"], avatar=avatar):
+            with message_container:
                 st.markdown(message["content"])
 
         if prompt := st.chat_input("Enter a prompt here..."):
             try:
                 st.session_state["messages"].append({"role": "user", "content": prompt})
-                message_container.chat_message("user", avatar="😎").markdown(prompt)
+                with message_container:
+                    st.markdown(prompt)
 
-                with message_container.chat_message("assistant", avatar="🤖"):
-                    with st.spinner(":green[processing...]"):
+                with message_container:
+                    with st.spinner("Processing..."):
                         if st.session_state["vector_db"] is not None:
                             response = process_question(
                                 prompt, st.session_state["vector_db"], selected_model
