@@ -94,12 +94,13 @@ def extract_text_from_pdf(file_upload) -> str:
     return text
 
 
-def create_vector_db(file_upload) -> Chroma:
+def create_vector_db(file_upload, embedding_model) -> Chroma:
     """
     Create a vector database from an uploaded PDF file.
 
     Args:
         file_upload (st.UploadedFile): Streamlit file upload object containing the PDF.
+        embedding_model (str): The embedding model to use.
 
     Returns:
         Chroma: A vector store containing the processed document chunks.
@@ -109,7 +110,7 @@ def create_vector_db(file_upload) -> Chroma:
     chunks = RecursiveCharacterTextSplitter(chunk_size=7500, chunk_overlap=100).split_text(text)
     logger.info("Document split into chunks")
 
-    embeddings = OllamaEmbeddings(model="nomic-embed-text", show_progress=True)
+    embeddings = OllamaEmbeddings(model=embedding_model, show_progress=True)
     vector_db = Chroma.from_texts(chunks, embeddings, collection_name="myRAG")
     logger.info("Vector DB created")
     return vector_db
@@ -253,6 +254,10 @@ def main() -> None:
             "Pick a model available locally on your system ↓", available_models
         )
 
+    embedding_model = st.sidebar.selectbox(
+        "Select an embedding model ↓", available_models
+    )
+
     file_upload = col1.file_uploader(
         "Upload a PDF file ↓", type="pdf", accept_multiple_files=False
     )
@@ -260,7 +265,7 @@ def main() -> None:
     if file_upload:
         st.session_state["file_upload"] = file_upload
         if st.session_state["vector_db"] is None:
-            st.session_state["vector_db"] = create_vector_db(file_upload)
+            st.session_state["vector_db"] = create_vector_db(file_upload, embedding_model)
         pdf_pages = extract_all_pages_as_images(file_upload)
         st.session_state["pdf_pages"] = pdf_pages
 
@@ -316,3 +321,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
