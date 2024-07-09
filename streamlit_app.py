@@ -116,13 +116,13 @@ def create_vector_db(file_upload, embedding_model) -> Chroma:
     return vector_db
 
 
-def process_question(question: str, vector_db: Chroma, selected_model: str) -> str:
+def process_question(question: str, vector_db: Optional[Chroma], selected_model: str) -> str:
     """
     Process a user question using the vector database and selected language model.
 
     Args:
         question (str): The user's question.
-        vector_db (Chroma): The vector database containing document embeddings.
+        vector_db (Optional[Chroma]): The vector database containing document embeddings.
         selected_model (str): The name of the selected language model.
 
     Returns:
@@ -130,38 +130,43 @@ def process_question(question: str, vector_db: Chroma, selected_model: str) -> s
     """
     logger.info(f"Processing question: {question} using model: {selected_model}")
     llm = ChatOllama(model=selected_model, temperature=0)
-    QUERY_PROMPT = PromptTemplate(
-        input_variables=["question"],
-        template="""You are an AI language model assistant. Your task is to generate 3
-        different versions of the given user question to retrieve relevant documents from
-        a vector database. By generating multiple perspectives on the user question, your
-        goal is to help the user overcome some of the limitations of the distance-based
-        similarity search. Provide these alternative questions separated by newlines.
-        Original question: {question}""",
-    )
 
-    retriever = MultiQueryRetriever.from_llm(
-        vector_db.as_retriever(), llm, prompt=QUERY_PROMPT
-    )
+    if vector_db is not None:
+        QUERY_PROMPT = PromptTemplate(
+            input_variables=["question"],
+            template="""You are an AI language model assistant. Your task is to generate 3
+            different versions of the given user question to retrieve relevant documents from
+            a vector database. By generating multiple perspectives on the user question, your
+            goal is to help the user overcome some of the limitations of the distance-based
+            similarity search. Provide these alternative questions separated by newlines.
+            Original question: {question}""",
+        )
 
-    template = """Answer the question based ONLY on the following context:
-    {context}
-    Question: {question}
-    If you don't know the answer, just say that you don't know, don't try to make up an answer.
-    Only provide the answer from the {context}, nothing else.
-    Add snippets of the context you used to answer the question.
-    """
+        retriever = MultiQueryRetriever.from_llm(
+            vector_db.as_retriever(), llm, prompt=QUERY_PROMPT
+        )
 
-    prompt = ChatPromptTemplate.from_template(template)
+        template = """Answer the question based ONLY on the following context:
+        {context}
+        Question: {question}
+        If you don't know the answer, just say that you don't know, don't try to make up an answer.
+        Only provide the answer from the {context}, nothing else.
+        Add snippets of the context you used to answer the question.
+        """
 
-    chain = (
-        {"context": retriever, "question": RunnablePassthrough()}
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
+        prompt = ChatPromptTemplate.from_template(template)
 
-    response = chain.invoke(question)
+        chain = (
+            {"context": retriever, "question": RunnablePassthrough()}
+            | prompt
+            | llm
+            | StrOutputParser()
+        )
+
+        response = chain.invoke(question)
+    else:
+        response = llm(question)
+
     logger.info("Question processed and response generated")
     return response
 
@@ -188,7 +193,7 @@ def extract_all_pages_as_images(file_upload) -> List[Any]:
     images = []
     for page in doc:
         pix = page.get_pixmap()
-        image = pix.get_image_data()
+        image = pix.tobytes("png")
         images.append(image)
     
     doc.close()
@@ -298,26 +303,20 @@ def main() -> None:
 
                 with message_container:
                     with st.spinner("Processing..."):
-                        if st.session_state["vector_db"] is not None:
-                            response = process_question(
-                                prompt, st.session_state["vector_db"], selected_model
-                            )
-                            st.markdown(response)
-                        else:
-                            st.warning("Please upload a PDF file first.")
+                        response = process_question(
+                            prompt, st.session_state.get("vector_db"), selected_model
+                        )
+                        st.markdown(response)
 
-                if st.session_state["vector_db"] is not None:
-                    st.session_state["messages"].append(
-                        {"role": "assistant", "content": response}
-                    )
+                st.session_state["messages"].append(
+                    {"role": "assistant", "content": response}
+                )
 
             except Exception as e:
                 st.error(e, icon="⛔️")
                 logger.error(f"Error processing prompt: {e}")
         else:
-            if st.session_state["vector_db"] is None:
-                st.warning("Upload a PDF file to begin chat...")
-
+            st.warning("Upload a PDF file to begin chat or start a new chat...")
 
 if __name__ == "__main__":
     main()
